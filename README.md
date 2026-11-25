@@ -22,3 +22,9 @@ Ohne `ETF_API_KEY` wird die ETF-Kategorie als ⚠️ N/A markiert.
 
 
 Mit `python monitor.py --dry-run` wird die Telegram-Nachricht nur ausgegeben, nicht gesendet.
+
+## Alarm-Logik
+- Alarm (🚨) nur, wenn der Score >= `ALERT_THRESHOLD` ist **und** sich seit dem letzten Lauf geändert hat (letzter Score in `state.json`).
+- Jeden Montagmorgen (UTC) kommt ein Wochenbericht als Lebenszeichen.
+- Schlägt der Workflow fehl, kommt eine Telegram-Warnung.
+- Fällt eine Datenquelle aus, steht das in der Nachricht.
