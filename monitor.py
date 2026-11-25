@@ -1,140 +1,105 @@
 #!/usr/bin/env python3
-"""Bitcoin-Turnaround-Monitor: 5-Punkte-Scoring + Telegram-Benachrichtigung."""
+"""Accumulation-Monitor für BTC & ETH: Wie gut ist der Einstieg heute? (Langfrist-Käufer)
+
+Score 0-100 aus Bewertung (200W-SMA, Mayer, ATH-Abstand) + Stimmung, siehe scoring.py.
+Telegram bei Zonenwechsel, jeden Montag als Wochenbericht, oder mit ALWAYS_NOTIFY=true.
+`--dry-run` gibt die Nachricht nur aus.
+"""
 import json
 import os
 import sys
 from datetime import datetime, timezone
 
+import pandas as pd
 import requests
 import yfinance as yf
 
+from scoring import accumulation_score, zone_name
+
 # ====================== KONFIGURATION ======================
-SMA_DAYS = 21                   # Technik: kurzer SMA
-SMA_LONG_DAYS = 50              # Technik: Kurs muss auch über diesem SMA liegen (Reclaim)
-ETF_CONSECUTIVE_INFLOW_DAYS = 2 # ETF: Anzahl Tage mit Netto-Zufluss in Folge
-FNG_EXTREME_FEAR = 20           # Stimmung: Extreme-Fear-Grenze (<)
-FNG_LOOKBACK_DAYS = 7           # Stimmung: Rückblick
-FUNDING_FLUSH_MAX = 0.005       # Derivate: Ø-Funding (letzte ~24h) in % pro 8h muss <= sein (Long-Überhebelung abgebaut)
-DXY_SMA_DAYS = 20               # Makro: DXY muss unter seinem eigenen SMA liegen (Dollar fällt)
-ALERT_THRESHOLD = int(os.getenv("ALERT_THRESHOLD", "3"))  # Mindestscore für Alarm
+COINS = {   # Name: (yfinance-Ticker, ETF-API-Asset, Futures-Symbol, OKX-Instrument)
+    "BTC": ("BTC-USD", "btc", "BTCUSDT", "BTC-USDT-SWAP"),
+    "ETH": ("ETH-USD", "eth", "ETHUSDT", "ETH-USDT-SWAP"),
+}
+HISTORY_START = {"BTC": "2014-09-17", "ETH": "2017-11-09"}
+# Kaufmultiplikator auf deinen normalen Sparbetrag je Zone (Untergrenze des Scores)
+BUY_MULTIPLIER = [(75, 2.5), (55, 1.5), (35, 1.0), (0, 0.5)]
+ETF_CONSECUTIVE_INFLOW_DAYS = 2
+FUNDING_FLUSH_MAX = 0.005       # Info: Ø-Funding in % pro 8h; darüber = Longs überhitzt
 HEARTBEAT_WEEKDAY = 0           # Wochenbericht: 0 = Montag (Morgenlauf, UTC)
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
-HTTP_TIMEOUT = 15               # Sekunden
+HTTP_TIMEOUT = 15
 ETF_API_URL = "https://api.cryptoetf.today/v1"
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 # ===========================================================
 
-OK, FAIL, NA = "✅", "❌", "⚠️"
+
+def multiplier(score):
+    return next(m for lo, m in BUY_MULTIPLIER if score >= lo)
 
 
 def completed_closes(df):
-    """Schlusskurse ohne die heutige, noch laufende Tageskerze (Lauf um 07:30/19:30 UTC)."""
+    """Schlusskurse ohne die heutige, noch laufende Tageskerze."""
     close = df["Close"].dropna()
+    close.index = close.index.tz_localize(None).normalize()
     if len(close) and close.index[-1].date() >= datetime.now(timezone.utc).date():
         close = close.iloc[:-1]
     return close
 
 
-def check_technical():
-    try:
-        df = yf.Ticker("BTC-USD").history(period="6mo", interval="1d", timeout=HTTP_TIMEOUT)
-        close = completed_closes(df)
-        if len(close) < SMA_LONG_DAYS:
-            raise ValueError("zu wenig Kursdaten")
-        price = float(close.iloc[-1])
-        sma = float(close.tail(SMA_DAYS).mean())
-        sma_long = float(close.tail(SMA_LONG_DAYS).mean())
-        ok = price > sma and price > sma_long
-        return (OK if ok else FAIL), f"Kurs {price:,.0f} $ | SMA{SMA_DAYS} {sma:,.0f} $ | SMA{SMA_LONG_DAYS} {sma_long:,.0f} $", price
-    except Exception as e:
-        return NA, f"Fehler/N/A ({type(e).__name__}: {e})", None
+def fetch_fng():
+    r = requests.get("https://api.alternative.me/fng/?limit=0", timeout=30)
+    r.raise_for_status()
+    return pd.Series({pd.Timestamp(int(d["timestamp"]), unit="s").normalize(): int(d["value"])
+                      for d in r.json()["data"]}).sort_index()
 
 
-def check_etf():
+def coin_score(name, fng):
+    ticker = COINS[name][0]
+    df = yf.Ticker(ticker).history(start=HISTORY_START[name], interval="1d", timeout=30)
+    price = completed_closes(df)
+    res = accumulation_score(price, fng).iloc[-1]
+    if pd.isna(res["score"]):
+        raise ValueError("zu wenig Historie")
+    return float(price.iloc[-1]), res
+
+
+def etf_info(asset):
     key = os.getenv("ETF_API_KEY")
     if not key:
-        return NA, "N/A (kein ETF_API_KEY gesetzt)"
+        return "N/A (kein ETF-Key)"
     try:
-        r = requests.get(f"{ETF_API_URL}/flows/btc",
-                         headers={"Authorization": f"Bearer {key}"}, timeout=HTTP_TIMEOUT)
+        r = requests.get(f"{ETF_API_URL}/flows/{asset}", headers={"Authorization": f"Bearer {key}"},
+                         timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         days = sorted(r.json()["days"], key=lambda d: d["date"])
-        # Tage ohne Flow (Wochenenden, US-Feiertage, heutiger noch nicht veröffentlichter Tag) ignorieren
-        days = [d for d in days if d["netFlowUsdM"] != 0]
-        last = days[-ETF_CONSECUTIVE_INFLOW_DAYS:]
-        if len(last) < ETF_CONSECUTIVE_INFLOW_DAYS:
-            raise ValueError("zu wenig Handelstage")
-        ok = all(d["netFlowUsdM"] > 0 for d in last)
-        txt = ", ".join(f"{d['date'][5:]}: {d['netFlowUsdM']:+,.0f} Mio $" for d in last)
-        return (OK if ok else FAIL), f"Netto-Flows {txt}"
+        days = [d for d in days if d["netFlowUsdM"] != 0][-ETF_CONSECUTIVE_INFLOW_DAYS:]  # nur Handelstage
+        icon = "↗️" if days and all(d["netFlowUsdM"] > 0 for d in days) else "↘️"
+        return f"{icon} " + ", ".join(f"{d['netFlowUsdM']:+,.0f} Mio $" for d in days)
     except Exception as e:
-        return NA, f"Fehler/N/A ({type(e).__name__}: {e})"
+        return f"N/A ({type(e).__name__})"
 
 
-def check_sentiment():
-    try:
-        r = requests.get("https://api.alternative.me/fng/?limit=7", timeout=HTTP_TIMEOUT)
-        r.raise_for_status()
-        # API liefert neueste zuerst
-        vals = [int(d["value"]) for d in r.json()["data"]][:FNG_LOOKBACK_DAYS]
-        if not vals:
-            raise ValueError("zu wenig Daten")
-        current = vals[0]
-        was_extreme = any(v < FNG_EXTREME_FEAR for v in vals)
-        ok = was_extreme and current > FNG_EXTREME_FEAR
-        return (OK if ok else FAIL), f"Aktuell {current} | 7d-Min {min(vals)} | Extreme Fear (<{FNG_EXTREME_FEAR}): {'ja' if was_extreme else 'nein'}"
-    except Exception as e:
-        return NA, f"Fehler/N/A ({type(e).__name__}: {e})"
-
-
-def _funding_rates_pct():
-    """Letzte Funding-Raten in % pro 8h (neueste zuletzt). Fallback-Kette, da Binance
-    US-Server (GitHub) blockt (HTTP 451)."""
+def funding_info(binance_sym, okx_inst):
+    """Ø der letzten 3 Funding-Raten in % pro 8h. Binance blockt US-Server -> Bybit/OKX-Fallback."""
     sources = [
-        ("Binance", "https://fapi.binance.com/fapi/v1/fundingRate",
-         {"symbol": "BTCUSDT", "limit": 3}, lambda j: [float(x["fundingRate"]) for x in j]),
-        ("Bybit", "https://api.bybit.com/v5/market/funding/history",
-         {"category": "linear", "symbol": "BTCUSDT", "limit": 3},
-         lambda j: [float(x["fundingRate"]) for x in reversed(j["result"]["list"])]),
-        ("OKX", "https://www.okx.com/api/v5/public/funding-rate-history",
-         {"instId": "BTC-USDT-SWAP", "limit": 3},
-         lambda j: [float(x["fundingRate"]) for x in reversed(j["data"])]),
+        ("https://fapi.binance.com/fapi/v1/fundingRate", {"symbol": binance_sym, "limit": 3},
+         lambda j: [float(x["fundingRate"]) for x in j]),
+        ("https://api.bybit.com/v5/market/funding/history",
+         {"category": "linear", "symbol": binance_sym, "limit": 3},
+         lambda j: [float(x["fundingRate"]) for x in j["result"]["list"]]),
+        ("https://www.okx.com/api/v5/public/funding-rate-history", {"instId": okx_inst, "limit": 3},
+         lambda j: [float(x["fundingRate"]) for x in j["data"]]),
     ]
-    errors = []
-    for name, url, params, parse in sources:
+    for url, params, parse in sources:
         try:
             r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
             r.raise_for_status()
             rates = [x * 100 for x in parse(r.json())]
-            if rates:
-                return name, rates
-            raise ValueError("leer")
-        except Exception as e:
-            errors.append(f"{name}: {type(e).__name__}")
-    raise RuntimeError("; ".join(errors))
-
-
-def check_funding():
-    """Funding-Flush: Ø der letzten Raten <= FUNDING_FLUSH_MAX (Standard-Funding ~0,01 % gilt als überhitzt)."""
-    try:
-        name, rates = _funding_rates_pct()
-        avg = sum(rates) / len(rates)
-        ok = avg <= FUNDING_FLUSH_MAX
-        return (OK if ok else FAIL), f"Ø Funding {avg:+.4f} % /8h über {len(rates)} Raten ({name}; Soll <= {FUNDING_FLUSH_MAX})"
-    except Exception as e:
-        return NA, f"Fehler/N/A ({e})"
-
-
-def check_macro():
-    try:
-        df = yf.Ticker("DX-Y.NYB").history(period="3mo", interval="1d", timeout=HTTP_TIMEOUT)
-        close = completed_closes(df)
-        if len(close) < DXY_SMA_DAYS:
-            raise ValueError("zu wenig Daten")
-        dxy = float(close.iloc[-1])
-        sma = float(close.tail(DXY_SMA_DAYS).mean())
-        return (OK if dxy < sma else FAIL), f"DXY {dxy:.2f} | SMA{DXY_SMA_DAYS} {sma:.2f} (Soll DXY < SMA)"
-    except Exception as e:
-        return NA, f"Fehler/N/A ({type(e).__name__}: {e})"
+            avg = sum(rates) / len(rates)
+            return f"{avg:+.4f} %/8h " + ("(erhöht)" if avg > FUNDING_FLUSH_MAX else "(entspannt)")
+        except Exception:
+            continue
+    return "N/A"
 
 
 def send_telegram(text):
@@ -142,18 +107,16 @@ def send_telegram(text):
     if not token or not chat:
         print("Telegram-Variablen fehlen – keine Nachricht gesendet.", file=sys.stderr)
         return False
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
-        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                          json={"chat_id": chat, "text": text, "parse_mode": "Markdown"},
+        r = requests.post(url, json={"chat_id": chat, "text": text, "parse_mode": "Markdown"},
                           timeout=HTTP_TIMEOUT)
-        if r.status_code == 400:  # Markdown-Parsing-Fehler -> als Klartext erneut senden
-            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                              json={"chat_id": chat, "text": text}, timeout=HTTP_TIMEOUT)
+        if r.status_code == 400:  # Markdown-Parsing-Fehler -> Klartext
+            r = requests.post(url, json={"chat_id": chat, "text": text}, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         return True
     except Exception as e:
-        # Token nicht in Logs ausgeben
-        print(f"Telegram-Fehler: {type(e).__name__}", file=sys.stderr)
+        print(f"Telegram-Fehler: {type(e).__name__}", file=sys.stderr)  # Token nie loggen
         return False
 
 
@@ -165,61 +128,68 @@ def load_state():
         return {}
 
 
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
-
-
 def main():
-    tech_icon, tech_txt, price = check_technical()
-    results = [
-        ("Technik", tech_icon, tech_txt),
-        ("ETF-Flows", *check_etf()),
-        ("Stimmung", *check_sentiment()),
-        ("Derivate", *check_funding()),
-        ("Makro", *check_macro()),
-    ]
-    score = sum(1 for _, icon, _ in results if icon == OK)
-    failed = [n for n, icon, _ in results if icon == NA]
     now_dt = datetime.now(timezone.utc)
     now = now_dt.strftime("%d.%m.%Y %H:%M UTC")
-    price_txt = f"{price:,.0f} $" if price else "N/A"
-
     state = load_state()
-    last_score = state.get("last_score")
-    always = os.getenv("ALWAYS_NOTIFY", "").strip().lower() == "true"
+    last_zones = state.get("zones", {})
+
+    try:
+        fng = fetch_fng()
+        fng_now = int(fng.iloc[-1])
+    except Exception as e:
+        print(f"Fear&Greed nicht verfügbar: {type(e).__name__}", file=sys.stderr)
+        fng, fng_now = None, None
+
+    blocks, changes, zones, failed = [], [], {}, []
+    for name, (_, etf_asset, fsym, okx) in COINS.items():
+        try:
+            price, r = coin_score(name, fng)
+        except Exception as e:
+            failed.append(name)
+            blocks.append(f"⚠️ *{name}*: Fehler/N/A ({type(e).__name__}: {e})")
+            continue
+        score = float(r["score"])
+        zone = zone_name(score)
+        zones[name] = zone
+        if name in last_zones and last_zones[name] != zone:
+            changes.append(f"{name}: {last_zones[name]} → {zone}")
+        blocks.append("\n".join([
+            f"*{name}*  {price:,.0f} $",
+            f"{zone}  |  Score *{score:.0f}/100*  |  Kauf: *{multiplier(score)}x* Sparbetrag",
+            f"Preis/200W-SMA {r['x200w']:.2f} | Mayer {r['mayer']:.2f} | ATH {r['drawdown']*100:.0f} %",
+            f"ETF-Flows: {etf_info(etf_asset)} | Funding: {funding_info(fsym, okx)}",
+        ]))
+
     heartbeat = now_dt.weekday() == HEARTBEAT_WEEKDAY and now_dt.hour < 12
-    crossed = score >= ALERT_THRESHOLD and score != last_score
-
-    # Konsolen-Zusammenfassung (GitHub Actions Logs)
-    print(f"=== BTC Turnaround Monitor | {now} ===")
-    print(f"Score: {score}/5 (zuletzt: {last_score}) | BTC: {price_txt}")
-    for name, icon, txt in results:
-        print(f"{icon} {name}: {txt}")
-
-    if crossed:
-        title = "🚨 *BTC-Turnaround-Signal*"
-    elif heartbeat:
-        title = "📋 *BTC-Wochenbericht*"
-    else:
-        title = "*₿ BTC-Turnaround-Monitor*"
-    lines = [title, f"📅 {now}", f"📊 Score: *{score}/5*  |  BTC: *{price_txt}*", ""]
-    lines += [f"{icon} *{name}*: {txt}" for name, icon, txt in results]
-    if failed:
-        lines += ["", f"⚠️ Ausgefallen: {', '.join(failed)} – Score evtl. zu niedrig."]
+    always = os.getenv("ALWAYS_NOTIFY", "").strip().lower() == "true"
+    title = "🚨 *Zonenwechsel*" if changes else "📋 *Wochenbericht*" if heartbeat else "*Accumulation-Monitor*"
+    lines = [title, f"📅 {now}"]
+    if fng_now is not None:
+        lines.append(f"😱 Fear & Greed: {fng_now}")
+    if changes:
+        lines += ["", *changes]
+    lines += ["", *[b + "\n" for b in blocks]]
+    lines.append("_Kein Anlagerat. Score = historische Günstigkeit, keine Prognose._")
     message = "\n".join(lines)
 
+    print(f"=== Accumulation-Monitor | {now} ===")
+    print(message.replace("*", "").replace("_", ""))
+
     if "--dry-run" in sys.argv:
-        print("\n--- DRY RUN: Telegram-Nachricht (nicht gesendet) ---\n" + message)
         return
-    if crossed or heartbeat or always:
+    if changes or heartbeat or always:
         print("Sende Telegram-Nachricht …", "OK" if send_telegram(message) else "FEHLGESCHLAGEN")
     else:
-        print(f"Keine Nachricht (Score {score}, Schwelle {ALERT_THRESHOLD}, unverändert/unter Schwelle).")
-    if state.get("last_score") != score:
-        state["last_score"] = score
-        state["updated"] = now
-        save_state(state)
+        print("Keine Nachricht (kein Zonenwechsel, kein Wochenbericht).")
+    # Ausgefallene Coins behalten ihre letzte Zone, damit der nächste Lauf korrekt vergleicht
+    new_zones = {**last_zones, **zones}
+    if new_zones != last_zones:
+        state = {"zones": new_zones, "updated": now}
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    if failed and len(failed) == len(COINS):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,98 +1,67 @@
 #!/usr/bin/env python3
-"""Backtest der 4 historisch verfügbaren Signale (ETF-Flows: Free-API nur 30 Tage -> nicht testbar).
-Nutzung: python backtest.py   (lokal; Binance-Funding-Historie, in den USA evtl. geblockt)"""
-import time
+"""Backtest des Accumulation-Scores für BTC und ETH (lokal ausführen: python backtest.py)."""
+import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
-from monitor import (SMA_DAYS, SMA_LONG_DAYS, FNG_EXTREME_FEAR, FNG_LOOKBACK_DAYS,
-                     FUNDING_FLUSH_MAX, DXY_SMA_DAYS)
-
-HORIZONS = (14, 30, 60)   # Tage nach dem Signal
+from scoring import accumulation_score, ZONES
 
 
-def btc():
-    df = yf.Ticker("BTC-USD").history(start="2018-03-01", interval="1d")
-    s = df["Close"].dropna(); s.index = s.index.tz_localize(None).normalize()
-    return s
-
-
-def dxy():
-    df = yf.Ticker("DX-Y.NYB").history(start="2018-01-01", interval="1d")
-    s = df["Close"].dropna(); s.index = s.index.tz_localize(None).normalize()
+def prices(ticker, start):
+    s = yf.Ticker(ticker).history(start=start, interval="1d")["Close"].dropna()
+    s.index = s.index.tz_localize(None).normalize()
     return s
 
 
 def fng():
     j = requests.get("https://api.alternative.me/fng/?limit=0", timeout=30).json()["data"]
-    s = pd.Series({pd.Timestamp(int(d["timestamp"]), unit="s").normalize(): int(d["value"]) for d in j})
-    return s.sort_index()
+    return pd.Series({pd.Timestamp(int(d["timestamp"]), unit="s").normalize(): int(d["value"])
+                      for d in j}).sort_index()
 
 
-def funding():
-    rows, start = [], int(pd.Timestamp("2019-09-10").timestamp() * 1000)
-    while True:
-        r = requests.get("https://fapi.binance.com/fapi/v1/fundingRate",
-                         params={"symbol": "BTCUSDT", "limit": 1000, "startTime": start}, timeout=30)
-        r.raise_for_status(); j = r.json()
-        if not j: break
-        rows += j; start = j[-1]["fundingTime"] + 1
-        if len(j) < 1000: break
-        time.sleep(0.2)
-    s = pd.Series({pd.Timestamp(x["fundingTime"], unit="ms"): float(x["fundingRate"]) * 100 for x in rows})
-    return s.sort_index().resample("D").mean()
+def buckets(name, p, sc):
+    print(f"\n===== {name}  ({sc.dropna().index[0].date()} – {sc.dropna().index[-1].date()}) =====")
+    fw = {h: p.shift(-h) / p - 1 for h in (365, 730)}
+    edges = [z[0] for z in ZONES][::-1] + [101]
+    print(f"{'Score':<9}{'Tage':>6} | " + " | ".join(f"{h//365}J: Ø / im Plus / schlechtester" for h in fw))
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (sc >= lo) & (sc < hi)
+        line = f"{lo:>3}-{min(hi,100):<5}{m.sum():>6} | "
+        parts = []
+        for h in fw:
+            r = fw[h][m].dropna()
+            parts.append(f"{r.mean()*100:>5.0f}% / {r.gt(0).mean()*100:>3.0f}% / {r.min()*100:>5.0f}%  (n={len(r)})" if len(r) else "n/a")
+        print(line + " | ".join(parts))
+    allr = {h: fw[h][sc.notna()].dropna() for h in fw}
+    print(f"{'Alle':<9}{sc.notna().sum():>6} | " + " | ".join(
+        f"{allr[h].mean()*100:>5.0f}% / {allr[h].gt(0).mean()*100:>3.0f}% / {allr[h].min()*100:>5.0f}%  (n={len(allr[h])})" for h in fw))
+
+
+def dca(name, p, sc, mult):
+    """Monatlicher Kauf: Standard-DCA (1x) vs. Score-gewichtet. Vergleich Ø-Kaufpreis & Rendite."""
+    buys = p[sc.notna()].resample("MS").first()
+    s = sc.reindex(buys.index)
+    res = {}
+    for label, f in (("Plain DCA", lambda x: 1.0), ("Score-DCA", lambda x: mult(x))):
+        amt = s.map(f)
+        coins = (amt / buys).sum()
+        spent = amt.sum()
+        res[label] = (spent / coins, coins * p.iloc[-1] / spent - 1, spent)
+    print(f"\n{name} monatlich seit {buys.index[0].date()}:")
+    for k, (avg, ret, spent) in res.items():
+        print(f"  {k:<10} Ø-Kaufpreis {avg:>9,.0f} $ | Rendite auf eingesetztes Kapital {ret*100:>6.0f}%")
 
 
 def main():
-    p = btc()
-    idx = p.index
-    sma, sma_l = p.rolling(SMA_DAYS).mean(), p.rolling(SMA_LONG_DAYS).mean()
-    tech = (p > sma) & (p > sma_l)
-
-    f = fng().reindex(idx)
-    sent = (f.rolling(FNG_LOOKBACK_DAYS).min() < FNG_EXTREME_FEAR) & (f > FNG_EXTREME_FEAR)
-
-    d = dxy().reindex(idx).ffill()
-    macro = d < d.rolling(DXY_SMA_DAYS).mean()
-
-    fr = funding().reindex(idx)
-    deriv = fr.rolling(1).mean() <= FUNDING_FLUSH_MAX
-
-    sig = pd.DataFrame({"Technik": tech, "Stimmung": sent, "Derivate": deriv, "Makro": macro})
-    valid = f.notna() & d.notna() & fr.notna() & sma_l.notna()
-    sig, p = sig[valid], p[valid]
-    score = sig.sum(axis=1)
-    print(f"Zeitraum {sig.index[0].date()} – {sig.index[-1].date()} ({len(sig)} Tage), max. Score 4 (ohne ETF)\n")
-    print("Trefferquote je Signal (% der Tage aktiv):")
-    print((sig.mean() * 100).round(1).to_string(), "\n")
-
-    fwd = {h: p.shift(-h) / p - 1 for h in HORIZONS}
-    base = {h: fwd[h].dropna() for h in HORIZONS}
-    print("Ø Rendite nach Score  (n = Tage | Ø Rendite | Anteil im Plus):")
-    hdr = "Score  n    " + "".join(f"{h:>3}d Ø / +%    " for h in HORIZONS)
-    print(hdr)
-    for sc in range(0, 5):
-        m = score == sc
-        line = f"{sc:>3} {m.sum():>5}  "
-        for h in HORIZONS:
-            r = fwd[h][m].dropna()
-            line += f"{(r.mean()*100 if len(r) else float('nan')):>6.1f}% /{(r.gt(0).mean()*100 if len(r) else float('nan')):>4.0f}%   "
-        print(line)
-    print("Alle Tage      " + "".join(f"{base[h].mean()*100:>6.1f}% /{base[h].gt(0).mean()*100:>4.0f}%   " for h in HORIZONS))
-
-    print("\nAlarm-Ereignisse (Score steigt auf >= Schwelle, wie im Monitor), je Schwelle:")
-    for th in (2, 3, 4):
-        ev = (score >= th) & (score.shift(1).fillna(0) < th)
-        # Cluster: Events mit <14 Tagen Abstand zusammenfassen
-        dates, last = [], None
-        for t in score.index[ev]:
-            if last is None or (t - last).days >= 14: dates.append(t)
-            last = t
-        line = f"Schwelle {th}: {len(dates)} unabhängige Alarme in {len(sig)/365:.1f} Jahren"
-        for h in HORIZONS:
-            r = fwd[h].reindex(dates).dropna()
-            if len(r): line += f" | {h}d Ø {r.mean()*100:+.1f}% ({r.gt(0).mean()*100:.0f}% im Plus, n={len(r)})"
-        print(line)
+    f = fng()
+    for name, tick, start in (("BTC", "BTC-USD", "2014-09-17"), ("ETH", "ETH-USD", "2017-11-09")):
+        p = prices(tick, start)
+        sc = accumulation_score(p, f)["score"]
+        buckets(name, p, sc)
+        mult = lambda x: 2.5 if x >= 75 else 1.5 if x >= 55 else 1.0 if x >= 35 else 0.5
+        dca(name, p, sc, mult)
+        # nur seit 2021 (200W-SMA für ETH erst ab dann verfügbar)
+        dca(name + " (ab 2022)", p["2022":], sc["2022":], mult)
 
 
 if __name__ == "__main__":

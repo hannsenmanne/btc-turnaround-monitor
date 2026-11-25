@@ -1,37 +1,31 @@
-# Bitcoin-Turnaround-Monitor
+# Accumulation-Monitor für BTC & ETH
 
-Prüft 2x täglich (07:30 / 19:30 UTC) fünf Signale (Technik, ETF-Flows, Stimmung, Derivate, Makro) und sendet bei Score ≥ 3/5 eine Telegram-Nachricht. Schwellenwerte stehen oben in `monitor.py`.
+Für Langfrist-Käufer: Der Bot bewertet täglich (07:30 / 19:30 UTC), **wie günstig der Einstieg historisch gesehen ist**, und schickt dir Telegram-Nachrichten bei Zonenwechsel sowie jeden Montag einen Wochenbericht. Er sagt keine Kurse voraus.
 
-## 1. Telegram-Bot
-1. In Telegram `@BotFather` öffnen → `/newbot` → Token notieren (`TELEGRAM_BOT_TOKEN`).
-2. Deinem Bot eine beliebige Nachricht schreiben.
-3. `https://api.telegram.org/bot<TOKEN>/getUpdates` aufrufen → `chat.id` notieren (`TELEGRAM_CHAT_ID`).
-
-## 2. GitHub
-1. Repo anlegen und alle Dateien pushen.
-2. *Settings → Secrets and variables → Actions* → Secrets anlegen: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, optional `ETF_API_KEY`.
-3. *Actions → BTC Turnaround Monitor → Run workflow* (mit `always_notify` für einen Test).
-
-## 3. Lokaler Test
-```bash
-pip install -r requirements.txt
-export TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... ALWAYS_NOTIFY=true
-python monitor.py
-```
-Ohne `ETF_API_KEY` wird die ETF-Kategorie als ⚠️ N/A markiert.
-
-
-Mit `python monitor.py --dry-run` wird die Telegram-Nachricht nur ausgegeben, nicht gesendet.
-
-## Alarm-Logik
-- Alarm (🚨) nur, wenn der Score >= `ALERT_THRESHOLD` ist **und** sich seit dem letzten Lauf geändert hat (letzter Score in `state.json`).
-- Jeden Montagmorgen (UTC) kommt ein Wochenbericht als Lebenszeichen.
-- Schlägt der Workflow fehl, kommt eine Telegram-Warnung.
-- Fällt eine Datenquelle aus, steht das in der Nachricht.
+## Score (0-100, je Coin)
+- **Bewertung (70 %):** Preis/200-Wochen-SMA, Preis/200-Tage-SMA (Mayer-Multiple), Abstand zum ATH. Jede Kennzahl wird als rollierendes 4-Jahres-Perzentil gegen die eigene Historie gerankt (keine festen Preisgrenzen).
+- **Stimmung (30 %):** 100 − Fear & Greed.
+- **Zonen:** ≥75 🟢 Starker Kaufbereich (2,5x Sparbetrag), ≥55 🟡 Kaufbereich (1,5x), ≥35 ⚪ Neutral (1x), darunter 🔴 Teuer (0,5x). Multiplikatoren in `BUY_MULTIPLIER`.
+- Nur zur Info (nicht im Score, da nicht historisch testbar): ETF-Flows der letzten 2 Handelstage, Funding-Rate.
 
 ## Backtest (`python backtest.py`, lokal)
-Getestet werden die 4 historisch verfügbaren Signale (ETF-Flows: Free-API nur 30 Tage), 2019-09 bis 2026-11, ~2.600 Tage.
-- Ergebnis: Der Score hat **keine nachweisbare Vorhersagekraft**. 30 Tage nach Score 3 lag BTC im Schnitt bei +3,3 % (Ø aller Tage: +4,1 %); Score 2 schnitt am besten ab (+5,8 %). Score 4 trat nur an 7 Tagen auf.
-- Stimmung ist nur an ~5 % der Tage aktiv und damit selten.
-- Schwelle 3 ist daher nicht besser belegt als 2 oder 4. Der Monitor ist eine Lagebeschreibung, kein Handelssignal.
-- Die Stichprobe ist klein (36 unabhängige Alarme bei Schwelle 3), die Ergebnisse überlappen sich und sind nicht signifikant.
+- Je höher der Score, desto besser die Trefferquote. BTC, 1 Jahr halten: Score 75-100 → 88 % im Plus (schlechtester Fall −56 %), Score <35 → 66 % (−83 %). ETH: 83 % vs. 45 %.
+- Monatlich kaufen und nach Score gewichten senkte den Ø-Kaufpreis seit 2022 um 17 % (BTC) bzw. 7 % (ETH) gegenüber gleichem Betrag jeden Monat.
+- **Grenzen:** Nur etwa drei Marktzyklen, überlappende Zeiträume, BTCs Historie war außergewöhnlich bullisch. Vor 2018 schnitt die Gewichtung bei BTC *schlechter* ab als normales Sparen (BTC galt als „teuer“, stieg aber weiter um das 100-Fache). Bewertungssignale können bei strukturellen Neubewertungen lange „zu teuer“ melden. Deshalb kauft man auch in der teuersten Zone mit 0,5x weiter.
+- Kein Anlagerat. Der Score beschreibt historische Günstigkeit, keine Prognose.
+
+## Einrichtung
+1. **Telegram:** `@BotFather` → `/newbot` → Token. Dem Bot schreiben, dann `https://api.telegram.org/bot<TOKEN>/getUpdates` → `chat.id`.
+2. **GitHub Secrets** (*Settings → Secrets and variables → Actions*): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, optional `ETF_API_KEY` (cryptoetf.today).
+3. *Actions → Run workflow* (`always_notify` für einen Test).
+
+## Lokaler Test
+```bash
+pip install -r requirements.txt
+python monitor.py --dry-run          # nur ausgeben
+ALWAYS_NOTIFY=true TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python monitor.py
+```
+
+## Betrieb
+- Alarm (🚨) bei Zonenwechsel (letzte Zone je Coin in `state.json`), Wochenbericht montags, Warnung bei fehlgeschlagenem Workflow.
+- Fällt eine Datenquelle aus, steht das in der Nachricht. GitHub pausiert geplante Workflows nach 60 Tagen ohne Repo-Aktivität.
