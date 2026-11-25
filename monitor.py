@@ -77,16 +77,35 @@ def check_sentiment():
         return NA, f"Fehler/N/A ({type(e).__name__}: {e})"
 
 
+def _funding_rate_pct():
+    """Funding in % pro 8h; Fallback-Kette, da Binance US-Server (GitHub) blockt (HTTP 451)."""
+    sources = [
+        ("Binance", "https://fapi.binance.com/fapi/v1/fundingRate",
+         {"symbol": "BTCUSDT", "limit": 3}, lambda j: float(j[-1]["fundingRate"])),
+        ("Bybit", "https://api.bybit.com/v5/market/funding/history",
+         {"category": "linear", "symbol": "BTCUSDT", "limit": 3},
+         lambda j: float(j["result"]["list"][0]["fundingRate"])),
+        ("OKX", "https://www.okx.com/api/v5/public/funding-rate",
+         {"instId": "BTC-USDT-SWAP"}, lambda j: float(j["data"][0]["fundingRate"])),
+    ]
+    errors = []
+    for name, url, params, parse in sources:
+        try:
+            r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            return name, parse(r.json()) * 100
+        except Exception as e:
+            errors.append(f"{name}: {type(e).__name__}")
+    raise RuntimeError("; ".join(errors))
+
+
 def check_funding():
     try:
-        r = requests.get("https://fapi.binance.com/fapi/v1/fundingRate",
-                         params={"symbol": "BTCUSDT", "limit": 3}, timeout=HTTP_TIMEOUT)
-        r.raise_for_status()
-        rate = float(r.json()[-1]["fundingRate"]) * 100  # in %
+        name, rate = _funding_rate_pct()
         ok = FUNDING_MIN <= rate <= FUNDING_MAX
-        return (OK if ok else FAIL), f"Funding {rate:+.4f} % /8h (Soll {FUNDING_MIN} bis {FUNDING_MAX})"
+        return (OK if ok else FAIL), f"Funding {rate:+.4f} % /8h ({name}; Soll {FUNDING_MIN} bis {FUNDING_MAX})"
     except Exception as e:
-        return NA, f"Fehler/N/A ({type(e).__name__}: {e})"
+        return NA, f"Fehler/N/A ({e})"
 
 
 def check_macro():
