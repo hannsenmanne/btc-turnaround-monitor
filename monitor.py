@@ -38,46 +38,25 @@ def check_technical():
         return NA, f"Fehler/N/A ({type(e).__name__}: {e})", None
 
 
-def _extract_flows(data):
-    """Versucht, eine chronologische Liste von Netto-Flows (USD) aus der API-Antwort zu lesen."""
-    rows = data
-    if isinstance(data, dict):
-        for key in ("data", "flows", "results", "items"):
-            if isinstance(data.get(key), list):
-                rows = data[key]
-                break
-    if not isinstance(rows, list) or not rows:
-        raise ValueError("unbekanntes Antwortformat")
-    if isinstance(rows[0], dict) and any("date" in k.lower() for k in rows[0]):
-        dk = next(k for k in rows[0] if "date" in k.lower())
-        rows = sorted(rows, key=lambda r: str(r.get(dk)))
-    flows = []
-    for r in rows:
-        if isinstance(r, dict):
-            val = next((r[k] for k in ("net_flow", "netFlow", "total_net_flow", "total", "net", "flow")
-                        if k in r), None)
-            if val is None:
-                raise ValueError("kein Flow-Feld gefunden")
-            flows.append(float(val))
-        else:
-            flows.append(float(r))
-    return flows
-
-
 def check_etf():
     key = os.getenv("ETF_API_KEY")
     if not key:
         return NA, "N/A (kein ETF_API_KEY gesetzt)"
     try:
-        r = requests.get(f"{ETF_API_URL}/flows", params={"asset": "BTC"},
-                         headers={"Authorization": f"Bearer {key}", "X-API-Key": key},
-                         timeout=HTTP_TIMEOUT)
+        r = requests.get(f"{ETF_API_URL}/flows/btc",
+                         headers={"Authorization": f"Bearer {key}"}, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
-        flows = _extract_flows(r.json())
-        last = flows[-ETF_CONSECUTIVE_INFLOW_DAYS:]
-        ok = len(last) == ETF_CONSECUTIVE_INFLOW_DAYS and all(f > 0 for f in last)
-        txt = ", ".join(f"{f / 1e6:+,.0f} Mio $" for f in last)
-        return (OK if ok else FAIL), f"Letzte {len(last)} Tage: {txt}"
+        days = sorted(r.json()["days"], key=lambda d: d["date"])
+        # Wochenenden entfernen; heutigen Tag ignorieren, solange noch 0 (nicht veröffentlicht)
+        days = [d for d in days if datetime.strptime(d["date"], "%Y-%m-%d").weekday() < 5]
+        if days and days[-1]["netFlowUsdM"] == 0:
+            days = days[:-1]
+        last = days[-ETF_CONSECUTIVE_INFLOW_DAYS:]
+        if len(last) < ETF_CONSECUTIVE_INFLOW_DAYS:
+            raise ValueError("zu wenig Handelstage")
+        ok = all(d["netFlowUsdM"] > 0 for d in last)
+        txt = ", ".join(f"{d['date'][5:]}: {d['netFlowUsdM']:+,.0f} Mio $" for d in last)
+        return (OK if ok else FAIL), f"Netto-Flows {txt}"
     except Exception as e:
         return NA, f"Fehler/N/A ({type(e).__name__}: {e})"
 

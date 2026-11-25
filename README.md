@@ -20,6 +20,5 @@ python monitor.py
 ```
 Ohne `ETF_API_KEY` wird die ETF-Kategorie als ⚠️ N/A markiert.
 
-**Hinweis:** Das Antwortformat der ETF-API ist nicht verifiziert; `_extract_flows` in `monitor.py` ggf. an die echte Antwort anpassen.
 
 Mit `python monitor.py --dry-run` wird die Telegram-Nachricht nur ausgegeben, nicht gesendet.
