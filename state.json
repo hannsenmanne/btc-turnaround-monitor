@@ -1,4 +1,7 @@
 {
-  "last_score": 0,
-  "updated": "25.11.2026 22:20 UTC"
+  "zones": {
+    "BTC": "\ud83d\udfe2 Starker Kaufbereich",
+    "ETH": "\ud83d\udfe2 Starker Kaufbereich"
+  },
+  "updated": "25.11.2026 22:35 UTC"
 }
