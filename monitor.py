@@ -26,10 +26,18 @@ ETF_API_URL = "https://api.cryptoetf.today/v1"
 OK, FAIL, NA = "✅", "❌", "⚠️"
 
 
+def completed_closes(df):
+    """Schlusskurse ohne die heutige, noch laufende Tageskerze (Lauf um 07:30/19:30 UTC)."""
+    close = df["Close"].dropna()
+    if len(close) and close.index[-1].date() >= datetime.now(timezone.utc).date():
+        close = close.iloc[:-1]
+    return close
+
+
 def check_technical():
     try:
         df = yf.Ticker("BTC-USD").history(period="6mo", interval="1d", timeout=HTTP_TIMEOUT)
-        close = df["Close"].dropna()
+        close = completed_closes(df)
         if len(close) < SMA_LONG_DAYS:
             raise ValueError("zu wenig Kursdaten")
         price = float(close.iloc[-1])
@@ -50,10 +58,8 @@ def check_etf():
                          headers={"Authorization": f"Bearer {key}"}, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         days = sorted(r.json()["days"], key=lambda d: d["date"])
-        # Wochenenden entfernen; heutigen Tag ignorieren, solange noch 0 (nicht veröffentlicht)
-        days = [d for d in days if datetime.strptime(d["date"], "%Y-%m-%d").weekday() < 5]
-        if days and days[-1]["netFlowUsdM"] == 0:
-            days = days[:-1]
+        # Tage ohne Flow (Wochenenden, US-Feiertage, heutiger noch nicht veröffentlichter Tag) ignorieren
+        days = [d for d in days if d["netFlowUsdM"] != 0]
         last = days[-ETF_CONSECUTIVE_INFLOW_DAYS:]
         if len(last) < ETF_CONSECUTIVE_INFLOW_DAYS:
             raise ValueError("zu wenig Handelstage")
@@ -121,7 +127,7 @@ def check_funding():
 def check_macro():
     try:
         df = yf.Ticker("DX-Y.NYB").history(period="3mo", interval="1d", timeout=HTTP_TIMEOUT)
-        close = df["Close"].dropna()
+        close = completed_closes(df)
         if len(close) < DXY_SMA_DAYS:
             raise ValueError("zu wenig Daten")
         dxy = float(close.iloc[-1])

@@ -28,3 +28,10 @@ Mit `python monitor.py --dry-run` wird die Telegram-Nachricht nur ausgegeben, ni
 - Jeden Montagmorgen (UTC) kommt ein Wochenbericht als Lebenszeichen.
 - Schlägt der Workflow fehl, kommt eine Telegram-Warnung.
 - Fällt eine Datenquelle aus, steht das in der Nachricht.
+
+## Backtest (`python backtest.py`, lokal)
+Getestet werden die 4 historisch verfügbaren Signale (ETF-Flows: Free-API nur 30 Tage), 2019-09 bis 2026-11, ~2.600 Tage.
+- Ergebnis: Der Score hat **keine nachweisbare Vorhersagekraft**. 30 Tage nach Score 3 lag BTC im Schnitt bei +3,3 % (Ø aller Tage: +4,1 %); Score 2 schnitt am besten ab (+5,8 %). Score 4 trat nur an 7 Tagen auf.
+- Stimmung ist nur an ~5 % der Tage aktiv und damit selten.
+- Schwelle 3 ist daher nicht besser belegt als 2 oder 4. Der Monitor ist eine Lagebeschreibung, kein Handelssignal.
+- Die Stichprobe ist klein (36 unabhängige Alarme bei Schwelle 3), die Ergebnisse überlappen sich und sind nicht signifikant.
