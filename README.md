@@ -1,6 +1,6 @@
 # Accumulation-Monitor für BTC & ETH
 
-Für Langfrist-Käufer: Der Bot bewertet täglich (07:30 / 19:30 UTC), **wie günstig der Einstieg historisch gesehen ist**, und schickt dir Telegram-Nachrichten bei Zonenwechsel sowie jeden Montag einen Wochenbericht. Er sagt keine Kurse voraus.
+Für Langfrist-Käufer: Der Bot bewertet täglich (07:30 / 19:30 UTC), **wie günstig der Einstieg historisch gesehen ist**, und schickt dir jeden Morgen (07:30 UTC) einen Tagesbericht per Telegram, montags als Wochenbericht, sowie abends bei Zonenwechsel eine Warnung. Er sagt keine Kurse voraus.
 
 ## Score (0-100, je Coin)
 - **Bewertung (70 %):** Preis/200-Wochen-SMA, Preis/200-Tage-SMA (Mayer-Multiple), Abstand zum ATH. Jede Kennzahl wird als rollierendes 4-Jahres-Perzentil gegen die eigene Historie gerankt (keine festen Preisgrenzen).
@@ -27,5 +27,5 @@ ALWAYS_NOTIFY=true TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python monitor.py
 ```
 
 ## Betrieb
-- Alarm (🚨) bei Zonenwechsel (letzte Zone je Coin in `state.json`), Wochenbericht montags, Warnung bei fehlgeschlagenem Workflow.
+- Tagesbericht jeden Morgen, Alarm (🚨) bei Zonenwechsel (letzte Zone je Coin in `state.json`), Warnung bei fehlgeschlagenem Workflow.
 - Fällt eine Datenquelle aus, steht das in der Nachricht. GitHub pausiert geplante Workflows nach 60 Tagen ohne Repo-Aktivität.

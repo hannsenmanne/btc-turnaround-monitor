@@ -2,7 +2,7 @@
 """Accumulation-Monitor für BTC & ETH: Wie gut ist der Einstieg heute? (Langfrist-Käufer)
 
 Score 0-100 aus Bewertung (200W-SMA, Mayer, ATH-Abstand) + Stimmung, siehe scoring.py.
-Telegram bei Zonenwechsel, jeden Montag als Wochenbericht, oder mit ALWAYS_NOTIFY=true.
+Telegram bei Zonenwechsel, täglich im Morgenlauf (montags als Wochenbericht), oder mit ALWAYS_NOTIFY=true.
 `--dry-run` gibt die Nachricht nur aus.
 """
 import json
@@ -161,9 +161,10 @@ def main():
             f"ETF-Flows: {etf_info(etf_asset)} | Funding: {funding_info(fsym, okx)}",
         ]))
 
-    heartbeat = now_dt.weekday() == HEARTBEAT_WEEKDAY and now_dt.hour < 12
+    daily = now_dt.hour < 12  # Morgenlauf (07:30 UTC) sendet täglich
+    weekly = daily and now_dt.weekday() == HEARTBEAT_WEEKDAY
     always = os.getenv("ALWAYS_NOTIFY", "").strip().lower() == "true"
-    title = "🚨 *Zonenwechsel*" if changes else "📋 *Wochenbericht*" if heartbeat else "*Accumulation-Monitor*"
+    title = "🚨 *Zonenwechsel*" if changes else "📋 *Wochenbericht*" if weekly else "📅 *Tagesbericht*" if daily else "*Accumulation-Monitor*"
     lines = [title, f"📅 {now}"]
     if fng_now is not None:
         lines.append(f"😱 Fear & Greed: {fng_now}")
@@ -178,10 +179,10 @@ def main():
 
     if "--dry-run" in sys.argv:
         return
-    if changes or heartbeat or always:
+    if changes or daily or always:
         print("Sende Telegram-Nachricht …", "OK" if send_telegram(message) else "FEHLGESCHLAGEN")
     else:
-        print("Keine Nachricht (kein Zonenwechsel, kein Wochenbericht).")
+        print("Keine Nachricht (kein Zonenwechsel, kein Morgenlauf).")
     # Ausgefallene Coins behalten ihre letzte Zone, damit der nächste Lauf korrekt vergleicht
     new_zones = {**last_zones, **zones}
     if new_zones != last_zones:
